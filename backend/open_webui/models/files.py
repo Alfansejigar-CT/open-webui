@@ -262,5 +262,20 @@ class FilesTable:
             except Exception as e:
                 log.error(f"Error fetching files by external_resource_id {external_resource_id}: {e}")
                 return []
+            
+    def get_file_by_external_file_id(self, file_id: str) -> Optional[FileModel]:
+        """
+        Get a file by its external (Google Drive) file ID.
+        """
+        with get_db() as db:
+            try:
+                # Query file with the matching file_id
+                file = db.query(File).filter_by(file_id=file_id).first()
+                if file:
+                    return FileModel.model_validate(file)
+                return None
+            except Exception as e:
+                log.error(f"Error fetching file by external file_id `{file_id}`: {str(e)}")
+                return None
 
 Files = FilesTable()

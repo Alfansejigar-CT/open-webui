@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional,List
 from sqlalchemy import Column, String, Text, Enum, Boolean, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -134,6 +134,19 @@ class ExternalResourcesTable:  # Renamed from GoogleDriveLinksTable
             except Exception as e:
                 log.error(f"Error deleting external resource {resource_id}: {e}")
                 return False
+            
+    
+    def get_resources_by_user_id(self, user_id: str) -> List[ExternalResourceModel]:
+        """
+        Fetch all external resource links for a given user.
+        """
+        with get_db() as db:
+            try:
+                resources = db.query(ExternalResource).filter_by(user_id=user_id).all()
+                return [ExternalResourceModel(**resource.__dict__) for resource in resources]
+            except Exception as e:
+                log.error(f"Error fetching external resources for user ID {user_id}: {e}")
+                return []
 
 # ================================================================
 # ExternalResourcesTable Instance

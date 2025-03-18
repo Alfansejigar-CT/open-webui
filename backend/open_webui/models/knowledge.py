@@ -216,6 +216,69 @@ class KnowledgeTable:
                 return True
             except Exception:
                 return False
+            
 
+    def add_external_link_to_knowledge(self, id: str, external_link: str):
+        """
+        Add an external link to the `external_links` array inside the knowledge base's `data` field.
+        """
+        with get_db() as db:
+            knowledge = db.query(Knowledge).filter_by(id=id).first()
+            
+            if not knowledge:
+                raise ValueError("Knowledge base not found.")
+
+            # Get the current data field or initialize it
+            data = knowledge.data or {}
+            external_links = data.get("external_links", [])
+
+            if external_link in external_links:
+                raise ValueError("External link already exists in the knowledge base.")
+
+            # Append the new link to the list
+            external_links.append(external_link)
+            data["external_links"] = external_links
+
+            # Perform the update
+            db.query(Knowledge).filter_by(id=id).update(
+                {"data": data, "updated_at": int(time.time())}
+            )
+            db.commit()
+
+            # Return the updated knowledge base
+            return KnowledgeModel.model_validate(knowledge)
+    
+
+
+
+    def get_knowledge_by_user_and_link(self, user_id: str, external_link: str) -> Optional[KnowledgeModel]:
+        """
+        Fetch a knowledge base by user ID and an external link in its `external_links`.
+
+        Args:
+            user_id: The ID of the user who owns the knowledge base.
+            external_link: The external link to match in the `external_links` array.
+
+        Returns:
+            KnowledgeModel: The knowledge base that matches the criteria, or None if not found.
+        """
+        try:
+            with get_db() as db:
+                # Query for knowledge bases by user_id and filter matching the external link
+                knowledge = db.query(Knowledge).filter_by(user_id=user_id).all()
+
+                # Iterate over the results to match the external link in the `data.external_links`
+                for kb in knowledge:
+                    data = kb.data or {}
+                    external_links = data.get("external_links", [])
+                    if external_link in external_links:
+                        return KnowledgeModel.model_validate(kb)
+                
+                # If no matching knowledge base is found, return None
+                return None
+        
+        except Exception as e:
+            log.exception("Error retrieving knowledge by user ID and external link.")
+            return None
 
 Knowledges = KnowledgeTable()

@@ -19,7 +19,10 @@
 		removeFileFromKnowledgeById,
 		resetKnowledgeById,
 		updateFileFromKnowledgeById,
-		updateKnowledgeById
+		updateKnowledgeById,
+
+		addExternalResourceToKnowledgeById
+
 	} from '$lib/apis/knowledge';
 
 	import { transcribeAudio } from '$lib/apis/audio';
@@ -54,6 +57,7 @@
 		description: string;
 		data: {
 			file_ids: string[];
+			external_links:[];
 		};
 		files: any[];
 	};
@@ -191,38 +195,37 @@
 		return driveRegex.test(link); // Returns true if link matches the pattern
 	};
 
-	// Extract the file or folder ID from a given Google Drive or Google Docs link
-	// const extractDriveId = (link: string): string | null => {
-	// 	const match = link.match(
-	// 		/https:\/\/(?:drive\.google\.com\/(?:file\/d\/|drive\/folders\/|open\?id=)|docs\.google\.com\/(?:document|spreadsheets|presentation)\/d\/)([\w-]+)/
-	// 	);
-	// 	return match ? match[1] : null; // Return the captured fileId (or null if no match)
-	// };
+	
 
 	const handleDriveLink = async (link: string) => {
+
 		if (!validateDriveLink(link)) {
 			toast.error('Invalid Google Drive link');
 			return;
 		}
 
-		// const driveId = extractDriveId(link);
-		// if (!driveId) {
-		// 	toast.error('Could not extract Drive ID');
-		// 	return;
-		// }
+		// Check if the link already exists in the knowledge base
+		const isLinkExist = knowledge?.data?.external_links?.includes(link);
+		if (isLinkExist) {
+			toast.error('This link already exists in your knowledge base.');
+			return;
+		}
 
 		try {
-			toast.info('Processing Google Drive link...');
+			// Step 1: Add the external link to the knowledge base in the server
+			toast.info('Adding the Google Drive link to the knowledge base...');
+			await addExternalResource(link); // Use the helper function to update the link on the server.
 
-			// Step 1: Fetch file metadata after uploading to DB
+			// Step 2: Fetch file metadata after the link is uploaded to the backend
+			toast.info('Processing Google Drive link...');
 			const files_metadata: FileMetadata[] = await processGoogleDriveLink(
 				localStorage.token,
 				link
-				
 			);
-			toast.success('Files uploaded successfully!');
 
-			// Step 2: Process each file metadata entry
+			toast.success('Google Drive link added and processed successfully!');
+
+			// Loop through all retrieved files and process each one
 			for (const fileMetadata of files_metadata) {
 				const tempItemId = uuidv4();
 
@@ -231,9 +234,8 @@
 					type: 'file',
 					file: '', // No actual file since it's already uploaded
 					id: null, // Will be updated after successful addition
-					url: '', // Add URL if your backend provides it
-					name: fileMetadata.name || `File from Google Drive (${fileMetadata.id})`, // Use metadata name
-					size: fileMetadata.meta.size, // File size from metadata
+					name: fileMetadata.name || `File from Google Drive (${fileMetadata.id})`,
+					size: fileMetadata.meta.size,
 					status: 'processing', // Initial processing state
 					error: '',
 					itemId: tempItemId
@@ -241,49 +243,50 @@
 
 				// Check for empty or invalid files to prevent invalid uploads
 				if (tempFileItem.size === 0) {
-					toast.error('You cannot upload an empty file.');
+					toast.error('Skipping empty file.');
 					continue;
 				}
 
-				// Add the temporary file entry to the knowledge object
+				// Add the temporary file entry to the local `knowledge.files` array
 				knowledge.files = [...(knowledge.files ?? []), tempFileItem];
 
 				try {
-					// Step 2.1: Add the file to the knowledge base using the file ID from metadata
-					toast.info(`Adding file ${fileMetadata.name} to the knowledge base...`);
+					// Add the file to the knowledge base using the file ID from metadata
+					toast.info(`Adding file "${fileMetadata.name}" to the knowledge base...`);
 					await addFileHandler(fileMetadata.id);
 
-					// Step 2.2: Update the file object in the knowledge.files array upon success
+					// Update the file marked as processing to its final state
 					knowledge.files = knowledge.files.map((item) => {
 						if (item.itemId === tempItemId) {
-							item.id = fileMetadata.id; // Set the actual database file ID
+							item.id = fileMetadata.id; // Assign the actual database file ID
 							item.status = 'uploaded'; // Mark as successfully uploaded
 						}
-						delete item.itemId; // Remove the temporary ID since it's no longer needed
+						delete item.itemId; // Remove the temporary ID
 						return item;
 					});
 
-					toast.success(`File ${fileMetadata.name} added to the knowledge base successfully.`);
+					toast.success(`File "${fileMetadata.name}" was successfully added to the knowledge base.`);
 				} catch (error) {
-					// Handle errors specific to adding this file
-					console.error(`Failed to add file ${fileMetadata.name} to the knowledge base`, error);
-					toast.error(`Failed to add file ${fileMetadata.name} to the knowledge base.`);
+					// Handle any errors related to adding this specific file
+					console.error(`Error adding file "${fileMetadata.name}":`, error);
+					toast.error(`Failed to add file "${fileMetadata.name}".`);
 
-					// Mark the file as errored in local state
+					// Mark the file as containing an error
 					knowledge.files = knowledge.files.map((item) => {
 						if (item.itemId === tempItemId) {
 							item.status = 'error';
-							item.error = 'Failed to process this file.';
+							item.error = 'Failed to add this file.';
 						}
 						return item;
 					});
 				}
 			}
 		} catch (err) {
-			console.error('Drive processing failed:', err);
-			toast.error('Failed to process Google Drive link');
+			// Handle errors related to processing the link itself
+			console.error('Error processing Google Drive link:', err);
+			toast.error('Failed to process the Google Drive link.');
 		}
-	};
+};
 	//  handle drive link
 
 	const uploadDirectoryHandler = async () => {
@@ -466,6 +469,25 @@
 			uploadDirectoryHandler();
 		}
 	};
+
+
+	const addExternalResource = async (link) => {
+    const updatedKnowledge = await addExternalResourceToKnowledgeById(localStorage.token, id, link).catch(
+        (e) => {
+            toast.error(`Error adding external resource: ${e}`);
+            return null;
+        }
+    );
+    if (updatedKnowledge) {
+        knowledge = updatedKnowledge; // Update local knowledge base
+		console.log(knowledge)
+        toast.success('Google Drive link added successfully!');
+    } else {
+        toast.error('Failed to add Google Drive link.');
+    }
+};
+
+
 
 	const addFileHandler = async (fileId) => {
 		const updatedKnowledge = await addFileToKnowledgeById(localStorage.token, id, fileId).catch(
@@ -658,6 +680,9 @@
 		dropZone?.removeEventListener('drop', onDrop);
 		dropZone?.removeEventListener('dragleave', onDragLeave);
 	});
+
+
+	
 </script>
 
 {#if dragged}

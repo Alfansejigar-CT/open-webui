@@ -2,7 +2,6 @@
 import asyncio
 from typing import Dict
 from uuid import uuid4
-
 from open_webui.models.externalResources import ExternalResources
 
 # A dictionary to keep track of active tasks
@@ -62,3 +61,22 @@ async def stop_task(task_id: str):
 
     return {"status": False, "message": f"Failed to stop task {task_id}."}
 
+
+async def periodic_sync(user_id: str, interval: int = 60):
+    """
+    Fetch all drive links for the user and sync periodically.
+    Runs indefinitely every `interval` seconds until canceled.
+    """
+    try:
+        while True:
+            resources_list = ExternalResources.get_resources_by_user_id(user_id)
+            print(f"Syncing resources for user {user_id}: {resources_list}")
+            
+            # Call your sync logic here as needed
+            # Example: sync_single_drive_resource(resources_list)
+
+            await asyncio.sleep(interval)  # Wait for the specified interval before running again
+    except asyncio.CancelledError:
+        print(f"Periodic sync canceled for user {user_id}")
+        # Perform any necessary cleanup if needed
+        raise

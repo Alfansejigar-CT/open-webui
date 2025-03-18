@@ -28,6 +28,12 @@ from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.models import Models, ModelForm
 
 
+
+class KnowledgeExternalResourceForm(BaseModel):
+    external_link: str  # Field for the external resource link
+
+
+
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
@@ -666,3 +672,62 @@ def add_files_to_knowledge_batch(
     return KnowledgeFilesResponse(
         **knowledge.model_dump(), files=Files.get_files_by_ids(existing_file_ids)
     )
+
+
+############################
+# AddExternalResourceToKnowledge
+############################
+
+
+@router.post("/{id}/external-resource/add", response_model=Optional[KnowledgeResponse])
+async def add_external_resource_to_knowledge_by_id(
+    id: str,
+    form_data: KnowledgeExternalResourceForm,
+    user=Depends(get_verified_user),
+):
+    """
+    Add an external resource (e.g., a link) to an existing knowledge base
+    """
+    # Fetch the knowledge base
+    knowledge = Knowledges.get_knowledge_by_id(id=id)
+    if not knowledge:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    # Check if the user has write access
+    if (
+        knowledge.user_id != user.id
+        and not has_access(user.id, "write", knowledge.access_control)
+        and user.role != "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    # Retrieve the existing external links
+    data = knowledge.data or {}
+    external_links = data.get("external_links", [])
+
+    # Check for duplicates
+    if form_data.external_link in external_links:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="External link already exists in the knowledge base.",
+        )
+
+    # Add the external link
+    external_links.append(form_data.external_link)
+    data["external_links"] = external_links
+
+    # Update knowledge base
+    updated_knowledge = Knowledges.update_knowledge_data_by_id(id=id, data=data)
+    if updated_knowledge:
+        return updated_knowledge
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to update knowledge base with the external resource.",
+        )

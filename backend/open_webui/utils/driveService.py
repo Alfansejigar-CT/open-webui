@@ -8,10 +8,11 @@ import traceback
 from datetime import datetime
 from mimetypes import guess_type
 from typing import Optional
+from fastapi import logger
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2.service_account import Credentials
-from open_webui.models.externalResources import ExternalResources
+from open_webui.models.externalResources import ExternalResource, ExternalResources
 from open_webui.storage.provider import Storage
 from open_webui.models.files import FileForm, Files
 from open_webui.routers.retrieval import process_file, ProcessFileForm
@@ -108,6 +109,65 @@ def download_file(service, file):
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"Download failed: {str(e)}")
+    
+
+#########################################
+async def update_drive_file(request, file_data, existing_file,user ):
+    """
+    Updates an existing file both in the storage system and the database.
+    Args:
+        file_data (dict): The updated file data from Google Drive.
+        existing_file (FileModel): The current file record from the database.
+        external_resource_id (int): The ID of the external resource associated with the file.
+    Returns:
+        FileModel: The updated file record from the database.
+    """
+    try:
+        # Validate input data
+        file_id = file_data.get("fileId")
+        name = file_data.get("name")
+        content = file_data.get("content")
+        meta = file_data.get("meta", {})
+        if not name or not content or not meta:
+            raise ValueError("Missing required file data (name, content, or meta).")
+        # Validate metadata fields
+        if not meta.get("content_type"):
+            raise ValueError(f"Missing 'content_type' in metadata for file '{name}'")
+        if not meta.get("size"):
+            raise ValueError(f"Missing 'size' in metadata for file '{name}'")
+        
+        # Generate a new unique filename for the updated file in storage
+        new_filename = f"{file_id}_{os.path.basename(name)}"
+        
+        # Upload the new file content to the storage provider
+        file_blob = io.BytesIO(content)
+        _, new_file_path = Storage.upload_file(file_blob, new_filename)
+        
+        # Prepare the updated metadata
+        updated_meta = {
+            "name": meta.get("name", name),
+            "content_type": meta.get("content_type"),
+            "size": int(meta.get("size")),
+            "md5": file_data.get("md5"),  # MD5 checksum
+            "modified_time": file_data.get("modifiedTime"),
+        }
+        
+        # Update the existing database record
+        Files.update_file_metadata_by_id(existing_file.id, updated_meta)
+        updated_file = Files.update_file_data_by_id(
+            existing_file.id,
+            {"path": new_file_path, "meta": updated_meta},
+        )
+        
+        # Trigger optional post-update actions, like reprocessing the file
+        process_file(request, ProcessFileForm(file_id=existing_file.id),user=user)
+        
+        return updated_file
+    except Exception as e:
+        traceback.print_exc()
+        raise Exception(f"Failed to update Google Drive file '{file_data.get('name', 'unknown')}': {str(e)}")
+
+    ####################################################
     
 async def upload_drive_file(request, file_data, user, external_resource_id):
     try:
@@ -207,3 +267,123 @@ async def process_google_drive_link(drive_link, user, request):
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"Failed to process Google Drive link: {str(e)}")
+    
+
+async def sync_single_drive_resource(request, resource: ExternalResource, user):
+    """Simplified sync without batch processing."""
+    try:
+        service = create_service()
+        
+        # Validate resource input
+        if not resource or not resource.resource_link or not resource.page_token:
+            raise ValueError("Invalid resource object or missing required fields")
+            
+        # Extract the Google Drive ID
+        drive_id = await get_drive_Id(resource.resource_link)
+        if not drive_id:
+            raise Exception("Invalid Google Drive link: Unable to extract drive ID.")
+            
+        # Fetch file metadata to determine if it is a folder
+        metadata = fetch_file_metadata(service, drive_id)
+        if not metadata:
+            raise Exception(f"Unable to fetch metadata for drive ID: {drive_id}")
+            
+        is_folder = metadata["mimeType"] == "application/vnd.google-apps.folder"
+        
+        # Process Drive changes
+        changes = service.changes().list(
+            pageToken=resource.page_token,
+            spaces="drive",
+            fields="changes(file(id,name,mimeType,md5Checksum,modifiedTime,size,parents),removed,fileId),newStartPageToken"
+        ).execute()
+        
+        updated_files_metadata = []
+        
+        for change in changes.get("changes", []):
+            file_id = change.get("fileId")
+            file_data = change.get("file", {})  # This contains metadata of the file
+            
+            # Skip changes not related to the target file/folder
+            if is_folder and (not file_data.get("parents") or drive_id not in file_data.get("parents")):
+                continue
+            elif not is_folder and file_id != drive_id:
+                continue
+                
+            try:
+                if change.get("removed") or file_data.get("trashed"):
+                    # Handle file deletion
+                    existing_file = Files.get_file_by_external_file_id(file_id)
+                    if existing_file:
+                        # Perform file deletion from storage
+                        if existing_file.path:
+                            try:
+                                Storage.delete_file(existing_file.path)
+                            except Exception as storage_error:
+                                logger.error(f"Error removing file from storage: {existing_file.path}, Error: {storage_error}")
+                                
+                        # Delete from database
+                        Files.delete_file_by_id(existing_file.id)
+                        
+                        # Append metadata for deleted file
+                        updated_files_metadata.append({
+                            "id": existing_file.id,
+                            "name": existing_file.filename,
+                            "path": existing_file.path,
+                            "meta": existing_file.meta
+                        })
+                else:
+                    # For files that weren't removed, we need to download the content
+                    # before we can update or create them
+                    downloaded_file = download_file(service, file_data)
+                    if not downloaded_file:
+                        logger.warning(f"Skipping file {file_id}: Unable to download content")
+                        continue
+                        
+                    # Now file_data has content and complete metadata
+                    file_data = downloaded_file
+                    
+                    existing_file = Files.get_file_by_external_file_id(file_id)
+                    
+                    # Determine if update is needed based on file type
+                    if existing_file:
+                        is_google_native = file_data.get("mimeType", "").startswith("application/vnd.google-apps.")
+                        needs_update = (
+                            existing_file.modified_time != file_data.get("modifiedTime") 
+                            if is_google_native
+                            else existing_file.md5_hash != file_data.get("md5")
+                        )
+                        
+                        if needs_update:
+                            # Update the file
+                            updated_file = await update_drive_file(request, file_data, existing_file, user)
+                            updated_files_metadata.append({
+                                "id": updated_file.id,
+                                "name": updated_file.filename,
+                                "path": updated_file.path if hasattr(updated_file, "path") else updated_file.get("path"),
+                                "meta": updated_file.meta
+                            })
+                    else:
+                        # Create a new file if it doesn't exist
+                        new_file = await upload_drive_file(request, file_data, user, resource.id)
+                        updated_files_metadata.append({
+                            "id": new_file.id,
+                            "name": new_file.filename,
+                            "path": new_file.path,
+                            "meta": new_file.meta
+                        })
+            except Exception as e:
+                logger.error(f"Error processing change for file {file_id}: {str(e)}", exc_info=True)
+                
+        # Update the page token after successful sync
+        ExternalResources.update_last_sync_and_token(
+            resource_id=resource.id,
+            page_token=changes.get("newStartPageToken")
+        )
+        
+        # Return a consistent metadata structure (similar to `process_google_drive_link`)
+        return {
+            "files_metadata": updated_files_metadata
+        }
+    except Exception as e:
+        logger.error(f"Error syncing Drive resource {resource.id}: {e}", exc_info=True)
+        raise

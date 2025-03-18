@@ -19,7 +19,6 @@ from aiocache import cached
 import aiohttp
 import requests
 
-
 from fastapi import (
     Depends,
     FastAPI,
@@ -353,7 +352,7 @@ from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
 from open_webui.tasks import stop_task, list_tasks  # Import from tasks.py
 
-
+from open_webui.tasks import periodic_sync
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
     Functions.deactivate_all_functions()
@@ -403,6 +402,12 @@ async def lifespan(app: FastAPI):
 
     if app.state.config.LICENSE_KEY:
         get_license_data(app, app.state.config.LICENSE_KEY)
+
+    # user_id = "USER_ID_HERE"  # Replace with the actual user_id (e.g., fetched from env/config)
+    # interval_seconds = 300  # Sync every 5 minutes (300 seconds)
+    
+    # _, periodic_sync_task = asyncio.create_task(periodic_sync(user_id, interval=interval_seconds))  # Run periodic sync
+    
 
     asyncio.create_task(periodic_usage_pool_cleanup())
     yield
